@@ -7,15 +7,20 @@ import argparse
 import os
 import asyncio
 import time
+from dotenv import load_dotenv
+
+# Load the environment variables from .env file
+load_dotenv()
 
 # Initialize the encoder
 enc = tiktoken.get_encoding("cl100k_base")
 INITIAL_CONTEXT = "A chat between a curious user and an assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input."
+STREAM_UPDATE_PERIOD = 1.2          # Seconds between updates
 
 model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin", 3 : "guanaco-65B.ggmlv3.q2_K.bin"}
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-m", "--model", type=str, default="guanaco-65B.ggmlv3.q2_K.bin")
+parser.add_argument("-m", "--model", type=str, default="nous-hermes-13b.ggmlv3.q2_K.bin")
 parser.add_argument("-l", "--len", type=int, default=2048)
 parser.add_argument("-s", "--stream", type=bool, default=False)
 
@@ -23,9 +28,9 @@ args = parser.parse_args()
 
 CONTEXT_END_BUFF = 512                                              # The difference between the max context len and when we should start pruning chat history
 CONTEXT_LEN = args.len                                              # Limits of the model
-CONTEXT_LEN_HIGHWATERMARK = CONTEXT_LEN - CONTEXT_END_BUFF        # Set the context length of the model
+CONTEXT_LEN_HIGHWATERMARK = CONTEXT_LEN - CONTEXT_END_BUFF          # Set the context length of the model
 
-llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=43, seed=-1, n_ctx=2048)
+llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=40, seed=-1, n_ctx=2048)
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -36,6 +41,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize an empty dictionary to store contexts
 contexts = {}
+
 
 @bot.event
 async def on_ready():
@@ -48,7 +54,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    if message.channel.name != 'chatgpt':
+    if message.channel.name != 'llm':
         return
 
     if message.author == bot.user:
@@ -90,7 +96,7 @@ async def on_message(message):
             if bot_message is None and len(string.strip(" ")) > 0:
                 bot_message = await message.channel.send(string)
 
-            if (time.time() - start_time) >= 1 and bot_message is not None:
+            if (time.time() - start_time) >= STREAM_UPDATE_PERIOD and bot_message is not None:
                 start_time = time.time()
                 await bot_message.edit(content=string)
 
@@ -102,11 +108,10 @@ async def on_message(message):
         contexts[guild_id].add_assistant_output(string)
 
 
-
 @bot.command()
 async def reset_chat(ctx):
         
-    if ctx.channel.name != 'chatgpt':
+    if ctx.channel.name != 'llm':
         return
     
     guild_id = ctx.guild.id
@@ -117,10 +122,11 @@ async def reset_chat(ctx):
     contexts[guild_id].reset_context()
     await ctx.channel.send("RESET CHAT HISTORY (THE BOT HAS FORGETTON THE CONVERSATION SO FAR)")
 
+
 @bot.command()
 async def set_initial_context(ctx, *, initial_context):
         
-    if ctx.channel.name != 'chatgpt':
+    if ctx.channel.name != 'llm':
         return
     
     guild_id = ctx.guild.id
@@ -137,13 +143,14 @@ async def switch_model(ctx, model):
         
     global llm                              # Ensure we are accessing the global llm variable
 
-    if ctx.channel.name != 'chatgpt':
+    if ctx.channel.name != 'llm':
         return
     
     guild_id = ctx.guild.id
     # If this server doesn't have a context yet, create one
     if guild_id not in contexts:
         contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048)
+
     model_str = model_dict[int(model)]
     del llm
     llm = Llama(model_path=model_str, n_threads=14, n_gpu_layers=43, seed=-1, n_ctx=2048)
@@ -151,5 +158,20 @@ async def switch_model(ctx, model):
     await ctx.channel.send("THE BOT IS NOW RUNNING ON A DIFFERENT MODEL: " + model_str)
 
 
-token = os.environ['DISCORD_TOKEN']
-bot.run(token)
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        # Report mistyped command
+        await ctx.send("Invalid command. Please check your command and try again.")
+    else:
+        # Handle other errors
+        print(f'Error occurred: {error}')
+
+
+token = os.getenv('DISCORD_TOKEN')
+
+# Make sure the token is not None before running the bot
+if token:
+    bot.run(token)
+else:
+    print("DISCORD_TOKEN environment variable is not set.")
