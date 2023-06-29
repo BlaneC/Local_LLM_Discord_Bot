@@ -17,10 +17,12 @@ enc = tiktoken.get_encoding("cl100k_base")
 INITIAL_CONTEXT = "A chat between a curious user and an assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input."
 STREAM_UPDATE_PERIOD = 1.2          # Seconds between updates
 
-model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin", 3 : "guanaco-65B.ggmlv3.q2_K.bin"}
+model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin",  3 : "guanaco-65B.ggmlv3.q2_K.bin" }
+
+prompt_format_dict = {"nous-hermes-13b.ggmlv3.q2_K.bin": ("### Instruction: ", "### Response: "), "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin": ("USER: ", "Assistant: "), "guanaco-65B.ggmlv3.q2_K.bin": ("USER: ", "Assistant: ")}
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-m", "--model", type=str, default="nous-hermes-13b.ggmlv3.q2_K.bin")
+parser.add_argument("-m", "--model", type=str, default="airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin")
 parser.add_argument("-l", "--len", type=int, default=2048)
 parser.add_argument("-s", "--stream", type=bool, default=False)
 
@@ -30,7 +32,7 @@ CONTEXT_END_BUFF = 512                                              # The differ
 CONTEXT_LEN = args.len                                              # Limits of the model
 CONTEXT_LEN_HIGHWATERMARK = CONTEXT_LEN - CONTEXT_END_BUFF          # Set the context length of the model
 
-llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=40, seed=-1, n_ctx=2048)
+llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=38, seed=-1, n_ctx=2048)
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -41,7 +43,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize an empty dictionary to store contexts
 contexts = {}
-
+model_str = args.model
 
 @bot.event
 async def on_ready():
@@ -51,6 +53,11 @@ async def on_ready():
         me = guild.me
         await me.edit(nick="Llama Bot")
 
+def create_context(guild_id):
+    # If this server doesn't have a context yet, create one
+    if guild_id not in contexts:
+        user, assistant = prompt_format_dict[model_str]
+        contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048, user, assistant)
 
 @bot.event
 async def on_message(message):
@@ -67,10 +74,7 @@ async def on_message(message):
         # Get the server ID
         guild_id = message.guild.id
 
-        # If this server doesn't have a context yet, create one
-        if guild_id not in contexts:
-            contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048)
-
+        create_context(guild_id)
 
         # Add the message to the context
         contexts[guild_id].add_user_input(message.content)
@@ -78,12 +82,13 @@ async def on_message(message):
         # Get the context for this server
         async with message.channel.typing():
             llm_str = contexts[guild_id].get_context_str()
-
+            user, assistant = prompt_format_dict[model_str]
             stream = llm(
                 llm_str,
-                max_tokens=512,
+                max_tokens=1024,
                 repeat_penalty= 1.1,
-                stop=[" USER: "],
+                temperature=0.7,
+                stop=[user.strip()],
                 stream=True,
             )
         
@@ -115,9 +120,8 @@ async def reset_chat(ctx):
         return
     
     guild_id = ctx.guild.id
-        # If this server doesn't have a context yet, create one
-    if guild_id not in contexts:
-        contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048)
+    # If this server doesn't have a context yet, create one
+    create_context(guild_id)
 
     contexts[guild_id].reset_context()
     await ctx.channel.send("RESET CHAT HISTORY (THE BOT HAS FORGETTON THE CONVERSATION SO FAR)")
@@ -130,9 +134,8 @@ async def set_initial_context(ctx, *, initial_context):
         return
     
     guild_id = ctx.guild.id
-        # If this server doesn't have a context yet, create one
-    if guild_id not in contexts:
-        contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048)
+    # If this server doesn't have a context yet, create one
+    create_context(guild_id)
 
     contexts[guild_id].set_initial_context(initial_context)
     await ctx.channel.send("THE BOT'S PERSONALITY AND THE CHAT IS NOW INFLUENCED BY TO YOUR TEXT: \n\n" + initial_context)
@@ -141,17 +144,18 @@ async def set_initial_context(ctx, *, initial_context):
 @bot.command()
 async def switch_model(ctx, model):
         
-    global llm                              # Ensure we are accessing the global llm variable
+    global llm, model_str                              # Ensure we are accessing the correct global variables
 
     if ctx.channel.name != 'llm':
         return
     
     guild_id = ctx.guild.id
     # If this server doesn't have a context yet, create one
-    if guild_id not in contexts:
-        contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048)
+    create_context(guild_id)
 
     model_str = model_dict[int(model)]
+    user, assistant = prompt_format_dict[model_str]
+    contexts[guild_id].set_prompt_style(user, assistant)
     del llm
     llm = Llama(model_path=model_str, n_threads=14, n_gpu_layers=43, seed=-1, n_ctx=2048)
 
