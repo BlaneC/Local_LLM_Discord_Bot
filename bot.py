@@ -22,7 +22,7 @@ model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4
 prompt_format_dict = {"nous-hermes-13b.ggmlv3.q2_K.bin": ("### Instruction: ", "### Response: "), "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin": ("USER: ", "Assistant: "), "guanaco-65B.ggmlv3.q2_K.bin": ("USER: ", "Assistant: ")}
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-m", "--model", type=str, default="airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin")
+parser.add_argument("-m", "--model", type=str, default="nous-hermes-13b.ggmlv3.q2_K.bin")
 parser.add_argument("-l", "--len", type=int, default=2048)
 parser.add_argument("-s", "--stream", type=bool, default=False)
 
@@ -32,7 +32,7 @@ CONTEXT_END_BUFF = 512                                              # The differ
 CONTEXT_LEN = args.len                                              # Limits of the model
 CONTEXT_LEN_HIGHWATERMARK = CONTEXT_LEN - CONTEXT_END_BUFF          # Set the context length of the model
 
-llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=38, seed=-1, n_ctx=2048)
+llm = Llama(model_path=args.model, n_threads=0, n_gpu_layers=43, seed=-1, n_ctx=2048)
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -98,14 +98,14 @@ async def on_message(message):
         for outputs in stream:
             string += outputs["choices"][0]['text']
 
-            if bot_message is None and len(string.strip(" ")) > 0:
+            if bot_message is None and len(string.strip(" ").strip("\n")) > 0:
                 bot_message = await message.channel.send(string)
 
-            if (time.time() - start_time) >= STREAM_UPDATE_PERIOD and bot_message is not None:
+            if (time.time() - start_time) >= STREAM_UPDATE_PERIOD and bot_message != None:
                 start_time = time.time()
                 await bot_message.edit(content=string)
 
-        if bot_message is not None:
+        if bot_message != None:
             await bot_message.edit(content=string)
         else:
             bot_message = await message.channel.send("*stares at you akwardly...")
