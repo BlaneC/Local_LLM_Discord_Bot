@@ -17,9 +17,9 @@ enc = tiktoken.get_encoding("cl100k_base")
 INITIAL_CONTEXT = "A chat between a curious user and an assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input."
 STREAM_UPDATE_PERIOD = 1.2          # Seconds between updates
 
-model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin",  3 : "guanaco-65B.ggmlv3.q2_K.bin" }
+model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin",  3 : "guanaco-65B.ggmlv3.q2_K.bin", 4: "vicuna-13b-v1.3.ggmlv3.q2_K.bin" }
 
-prompt_format_dict = {"nous-hermes-13b.ggmlv3.q2_K.bin": ("### Instruction: ", "### Response: "), "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin": ("USER: ", "Assistant: "), "guanaco-65B.ggmlv3.q2_K.bin": ("USER: ", "Assistant: ")}
+prompt_format_dict = {"nous-hermes-13b.ggmlv3.q2_K.bin": ("### Instruction: ", "### Response: "), "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin": ("USER: ", "Assistant: "), "guanaco-65B.ggmlv3.q2_K.bin": ("USER: ", "Assistant: "), "vicuna-13b-v1.3.ggmlv3.q2_K.bin": ("### Instruction: ", "### Response: ")}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-m", "--model", type=str, default="nous-hermes-13b.ggmlv3.q2_K.bin")
@@ -32,7 +32,7 @@ CONTEXT_END_BUFF = 512                                              # The differ
 CONTEXT_LEN = args.len                                              # Limits of the model
 CONTEXT_LEN_HIGHWATERMARK = CONTEXT_LEN - CONTEXT_END_BUFF          # Set the context length of the model
 
-llm = Llama(model_path=args.model, n_threads=0, n_gpu_layers=43, seed=-1, n_ctx=2048)
+llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=43, seed=-1, n_ctx=2048)
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -93,9 +93,18 @@ async def on_message(message):
             )
         
         bot_message = None
+        second_message = None
         string = ""
+        prev_string = ""
         start_time = time.time()
         for outputs in stream:
+
+            if len(string + outputs["choices"][0]['text']) > 1000:
+                prev_message = bot_message
+                bot_message = await message.channel.send(string)
+                prev_string = string
+                string = ""
+
             string += outputs["choices"][0]['text']
 
             if bot_message is None and len(string.strip(" ").strip("\n")) > 0:
