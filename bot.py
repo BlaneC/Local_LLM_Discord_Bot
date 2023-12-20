@@ -1,39 +1,25 @@
 import discord
 from discord.ext import commands
-from context import ChatContext
-import tiktoken
-from llama_cpp import Llama
-import argparse
-import os
+import json
+import aiohttp
 import asyncio
-import time
+import os
 from dotenv import load_dotenv
+import subprocess
 
 # Load the environment variables from .env file
 load_dotenv()
 
-# Initialize the encoder
-enc = tiktoken.get_encoding("cl100k_base")
-INITIAL_CONTEXT = "A chat between a curious user and an assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input."
-STREAM_UPDATE_PERIOD = 1.2          # Seconds between updates
-
-model_dict = {1 : "nous-hermes-13b.ggmlv3.q2_K.bin", 2 : "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin",  3 : "guanaco-65B.ggmlv3.q2_K.bin" }
-
-prompt_format_dict = {"nous-hermes-13b.ggmlv3.q2_K.bin": ("### Instruction: ", "### Response: "), "airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin": ("USER: ", "Assistant: "), "guanaco-65B.ggmlv3.q2_K.bin": ("USER: ", "Assistant: ")}
-
-parser = argparse.ArgumentParser()
-parser.add_argument("-m", "--model", type=str, default="airoboros-33b-gpt4-1.4.ggmlv3.q2_K.bin")
-parser.add_argument("-l", "--len", type=int, default=2048)
-parser.add_argument("-s", "--stream", type=bool, default=False)
-
-args = parser.parse_args()
-
-CONTEXT_END_BUFF = 512                                              # The difference between the max context len and when we should start pruning chat history
-CONTEXT_LEN = args.len                                              # Limits of the model
-CONTEXT_LEN_HIGHWATERMARK = CONTEXT_LEN - CONTEXT_END_BUFF          # Set the context length of the model
-
-llm = Llama(model_path=args.model, n_threads=14, n_gpu_layers=38, seed=-1, n_ctx=2048)
-
+model = "dolphin-mixtral:8x7b-v2.5-q4_0"  # Update this for whatever model you wish to use
+BOT_NAME = "Dolphin Mixtral Bot"
+STREAM_UPDATE_PERIOD = 0.5  # Time in seconds between message updates
+MAX_MESSAGE_LENGTH = 1500  # Maximum Discord message length before sending a new message
+SYSTEM_MESSAGE = """I am a helpful Discord bot, here to answer your questions, provide information, and make your experience on Discord more enjoyable.
+                Should you ever feel that our conversation has strayed from the topic at hand or that you would like to start fresh with a new query, 
+                simply type !clear_context in any channel where I am present. This command will reset my context window, allowing us to begin anew with a clean slate.
+                I am programmed to be patient and understanding, so feel free to ask me anything, no matter how simple or complex the question may be. 
+                My primary goal is to ensure that our interaction is informative, engaging, and enjoyable for all parties involved. Let's work together to broaden our knowledge and perspectives!
+                """
 intents = discord.Intents.default()
 intents.messages = True
 intents.reactions = True
@@ -43,21 +29,91 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize an empty dictionary to store contexts
 contexts = {}
-model_str = args.model
+content_lock = asyncio.Lock()
+
+
+def start_docker_container():
+    try:
+        # Run the Docker container
+        try:
+            subprocess.run(["docker", "run", "-d", "--gpus=all", "-v", "ollama:/root/.ollama", "-p", "11434:11434", "--name", "ollama", "ollama/ollama"], check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Error running docker container: {e}")
+        # Execute the program in the container (non-interactive mode)
+        subprocess.run(["docker", "exec", "ollama", "ollama", "run", model], check=True)
+        print("Docker container started and program executed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred while starting the Docker container: {e}")
+
+
+async def update_message_periodically(bot_message, shared_content):
+    while not shared_content['done']:
+        await asyncio.sleep(STREAM_UPDATE_PERIOD)
+        async with content_lock:
+            current_content = shared_content['content']
+
+            if len(current_content) > MAX_MESSAGE_LENGTH:
+                # Find the last word boundary before MAX_MESSAGE_LENGTH
+                split_index = current_content.rfind(' ', 0, MAX_MESSAGE_LENGTH)
+                if split_index == -1:
+                    # If no space is found, use MAX_MESSAGE_LENGTH
+                    split_index = MAX_MESSAGE_LENGTH
+
+                message_to_send = current_content[:split_index]
+                remaining_content = current_content[split_index:].strip()
+                shared_content['content'] = remaining_content
+                
+                await bot_message.edit(content=message_to_send)
+                bot_message = await bot_message.channel.send(remaining_content)
+            elif current_content:
+                # Edit the existing message with the current content
+                await bot_message.edit(content=current_content)
+
+
+
+async def stream_chat(messages, shared_content):
+    message_buff = ""
+    async with aiohttp.ClientSession() as session:
+        async with session.post("http://localhost:11434/api/chat", json={"model": model, "messages": messages, "system": SYSTEM_MESSAGE, "stream": True}) as response:
+            async for line in response.content:
+                body = json.loads(line.decode('utf-8'))
+                if "error" in body:
+                    raise Exception(body["error"])
+                else:
+                    message_buff += body.get("message", {}).get("content", "")
+                async with content_lock:
+                    if body.get("done") is False:
+                        shared_content['content'] += message_buff
+                        message_buff = ""
+                    if body.get("done", False):
+                        shared_content['done'] = True
+                        break
 
 @bot.event
 async def on_ready():
     print(f'We have logged in as {bot.user}')
-        # Update the bot's nickname in all servers
     for guild in bot.guilds:
         me = guild.me
-        await me.edit(nick="Llama Bot")
+        await me.edit(nick=BOT_NAME)
 
 def create_context(guild_id):
-    # If this server doesn't have a context yet, create one
     if guild_id not in contexts:
-        user, assistant = prompt_format_dict[model_str]
-        contexts[guild_id] = ChatContext(INITIAL_CONTEXT, enc, 2048, user, assistant)
+        contexts[guild_id] = []
+
+@bot.command(name='set_system_message')
+async def set_system_message(ctx, *, system_message: str):
+    global current_system_message
+    current_system_message = system_message
+    await ctx.send(f"System message updated to: {system_message}")
+
+@bot.command(name='clear_context')
+async def clear_context(ctx):
+    guild_id = ctx.guild.id
+    if guild_id in contexts:
+        contexts[guild_id] = []
+        await ctx.send("Context cleared.")
+    else:
+        await ctx.send("No context to clear.")
 
 @bot.event
 async def on_message(message):
@@ -67,114 +123,31 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if message.content[0] == '!':
-       await bot.process_commands(message)
-
-    else:
-        # Get the server ID
-        guild_id = message.guild.id
-
-        create_context(guild_id)
-
-        # Add the message to the context
-        contexts[guild_id].add_user_input(message.content)
-
-        # Get the context for this server
-        async with message.channel.typing():
-            llm_str = contexts[guild_id].get_context_str()
-            user, assistant = prompt_format_dict[model_str]
-            stream = llm(
-                llm_str,
-                max_tokens=1024,
-                repeat_penalty= 1.1,
-                temperature=0.7,
-                stop=[user.strip()],
-                stream=True,
-            )
-        
-        bot_message = None
-        string = ""
-        start_time = time.time()
-        for outputs in stream:
-            string += outputs["choices"][0]['text']
-
-            if bot_message is None and len(string.strip(" ")) > 0:
-                bot_message = await message.channel.send(string)
-
-            if (time.time() - start_time) >= STREAM_UPDATE_PERIOD and bot_message is not None:
-                start_time = time.time()
-                await bot_message.edit(content=string)
-
-        if bot_message is not None:
-            await bot_message.edit(content=string)
-        else:
-            bot_message = await message.channel.send("*stares at you akwardly...")
-
-        contexts[guild_id].add_assistant_output(string)
-
-
-@bot.command()
-async def reset_chat(ctx):
-        
-    if ctx.channel.name != 'llm':
+    if message.content.startswith('!'):
+        await bot.process_commands(message)
         return
-    
-    guild_id = ctx.guild.id
-    # If this server doesn't have a context yet, create one
+
+    guild_id = message.guild.id
     create_context(guild_id)
+    contexts[guild_id].append({"role": "user", "content": message.content})
 
-    contexts[guild_id].reset_context()
-    await ctx.channel.send("RESET CHAT HISTORY (THE BOT HAS FORGETTON THE CONVERSATION SO FAR)")
+    bot_message = await message.channel.send("Thinking...")
+    shared_content = {'content': '', 'done': False}
 
-
-@bot.command()
-async def set_initial_context(ctx, *, initial_context):
-        
-    if ctx.channel.name != 'llm':
-        return
-    
-    guild_id = ctx.guild.id
-    # If this server doesn't have a context yet, create one
-    create_context(guild_id)
-
-    contexts[guild_id].set_initial_context(initial_context)
-    await ctx.channel.send("THE BOT'S PERSONALITY AND THE CHAT IS NOW INFLUENCED BY TO YOUR TEXT: \n\n" + initial_context)
-
-    
-@bot.command()
-async def switch_model(ctx, model):
-        
-    global llm, model_str                              # Ensure we are accessing the correct global variables
-
-    if ctx.channel.name != 'llm':
-        return
-    
-    guild_id = ctx.guild.id
-    # If this server doesn't have a context yet, create one
-    create_context(guild_id)
-
-    model_str = model_dict[int(model)]
-    user, assistant = prompt_format_dict[model_str]
-    contexts[guild_id].set_prompt_style(user, assistant)
-    del llm
-    llm = Llama(model_path=model_str, n_threads=14, n_gpu_layers=43, seed=-1, n_ctx=2048)
-
-    await ctx.channel.send("THE BOT IS NOW RUNNING ON A DIFFERENT MODEL: " + model_str)
+    # Run streaming and message updating concurrently
+    await asyncio.gather(
+        stream_chat(contexts[guild_id], shared_content),
+        update_message_periodically(bot_message, shared_content)
+    )
+    async with content_lock:
+        contexts[guild_id].append({"role": "assistant", "content": shared_content["content"]})
 
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        # Report mistyped command
-        await ctx.send("Invalid command. Please check your command and try again.")
-    else:
-        # Handle other errors
-        print(f'Error occurred: {error}')
+# Call the function to start the Docker container
+start_docker_container()
 
-
+# Start the Discord bot
 token = os.getenv('DISCORD_TOKEN')
-
-# Make sure the token is not None before running the bot
 if token:
     bot.run(token)
 else:
