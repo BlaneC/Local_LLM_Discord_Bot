@@ -219,7 +219,7 @@ async def on_message(message):
     json_string = extract_json_string(llm_response)
 
     if json_string:
-        llm_response = llm_response.replace(json_string.strip(), "")
+        llm_response = llm_response.replace(json_string.strip(), "Generating Image...")
         await bot_message.edit(content=llm_response)
         try:
             response_data = json.loads(json_string)
