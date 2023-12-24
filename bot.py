@@ -15,11 +15,24 @@ import io
 load_dotenv()
 
 
-PRE_PROMPT_JSON = '''If the user asks you to generate an image, output the following json, and an image generator will fulfil the request:
+PRE_PROMPT_JSON = '''
+If the user asks you to generate an image, output the following json, and an image generator will fulfil the request:
+Ex:
+user: Create an image of a beautiful landscape
+assistant: 
 {
   "command": "generate_image",
   "prompt": "A beautiful landscape with mountains"
-}'''
+}
+If the user asks you to fulfill a request, and then generate an image. Fulfil the request, and then generate an image:
+Ex: 
+user: Tell me a story and then make an image about the story.
+assistant: In a land far far away...
+{
+  "command": "generate_image",
+  "prompt": "Details relevant to story"
+}
+'''
 
 model = "dolphin-mixtral:8x7b-v2.5-q4_0"  # Update this for whatever model you wish to use
 llava_model = "llava:13b"
@@ -42,6 +55,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize an empty dictionary to store contexts
 contexts = {}
+latest_bot_message = {}
 
 async def generate_image_from_text(prompt):
     async with aiohttp.ClientSession() as session:
@@ -72,6 +86,7 @@ async def update_message_periodically(bot_message, shared_content):
             
             await bot_message.edit(content=message_to_send)
             bot_message = await bot_message.channel.send(remaining_content)
+            latest_bot_message = bot_message
         elif current_content:
             # Edit the existing message with the current content
             await bot_message.edit(content=current_content)
@@ -79,7 +94,7 @@ async def update_message_periodically(bot_message, shared_content):
 async def stream_chat(messages, shared_content):
     message_buff = ""
     async with aiohttp.ClientSession() as session:
-        async with session.post("http://localhost:11434/api/chat", json={"model": model, "messages": messages, "system": SYSTEM_MESSAGE, "stream": True}) as response:
+        async with session.post("http://localhost:11434/api/chat", json={"model": model, "messages": messages, "system": SYSTEM_MESSAGE + PRE_PROMPT_JSON, "stream": True}) as response:
             async for line in response.content:
                 body = json.loads(line.decode('utf-8'))
                 if "error" in body:
@@ -192,6 +207,7 @@ async def on_message(message):
 
     image_descriptions = []
     bot_message = await message.channel.send("Thinking...")
+    latest_bot_message = bot_message
 
     if message.attachments and message.channel.permissions_for(message.guild.me).attach_files:
         await bot_message.edit(content="Looking at images...")
@@ -201,6 +217,7 @@ async def on_message(message):
 
     elif not message.channel.permissions_for(message.guild.me).attach_files:
         await message.channel.send("I don't have permission to analyze images.")
+        latest_bot_message = message
 
     image_description_text = '\nDescription of images attached: \n'.join(image_descriptions)
     contexts[guild_id].append({"role": "user", "content": message.content + image_description_text})
@@ -219,8 +236,8 @@ async def on_message(message):
     json_string = extract_json_string(llm_response)
 
     if json_string:
-        llm_response = llm_response.replace(json_string.strip(), "Generating Image...")
-        await bot_message.edit(content=llm_response)
+        llm_response = llm_response.replace(json_string.strip(), "\nGenerating Image...")
+        await latest_bot_message.edit(content=llm_response)
         try:
             response_data = json.loads(json_string)
             if response_data.get("command") == "generate_image":
@@ -229,8 +246,8 @@ async def on_message(message):
                 if image_data:
                     with io.BytesIO(image_data) as image_binary:
                         discord_file = discord.File(fp=image_binary, filename='ai-image.png')
-                        await message.channel.send(file=discord_file)
-
+                        await latest_bot_message.edit(content=llm_response.replace("Generating Image...", "-"))
+                        latest_bot_message = await message.channel.send(file=discord_file)
         except json.JSONDecodeError:
             # If the extracted string isn't valid JSON, handle or ignore
             pass
