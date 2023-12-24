@@ -1,0 +1,46 @@
+version: '2.3'
+
+services:
+  discord-ai-bot:
+    image: discord-ai-bot
+    container_name: discord-ai-bot
+    volumes:
+      - C:\Users\bcypu\Documents\Projects\Discord-Bot:/usr/src/app
+    network_mode: host
+
+  diffusion-server:
+    image: diffusion-server
+    container_name: diffusion-server
+    volumes:
+      - C:\Users\bcypu\Documents\Projects\Stable_Diffusion_Server\transformers-cache:/transformers-cache
+      - C:\Users\bcypu\Documents\Projects\Stable_Diffusion_Server\:/usr/src/app
+    environment:
+      - HF_HOME=/transformers-cache
+    runtime: nvidia
+    network_mode: host
+
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    volumes:
+      - ollama:/root/.ollama
+    command: ["serve"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    runtime: nvidia
+    network_mode: host
+
+  ollama-lava:
+    image: ollama/ollama
+    container_name: ollama_lava
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11435
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ollama:/root/.ollama
+    command: ["serve"]
+    runtime: nvidia
+    network_mode: host
+
+volumes:
+  ollama:
