@@ -69,28 +69,33 @@ async def generate_image_from_text(prompt):
                 return None
 
 async def update_message_periodically(bot_message, shared_content, shared_content_lock):
+    all_messages = []  # Initialize an empty list to store messages
+    all_messages.append(bot_message)  # Add the new message to the list
     while not shared_content['done']:
         await asyncio.sleep(STREAM_UPDATE_PERIOD)
         async with shared_content_lock:    
             current_content = shared_content['content']
 
             if len(current_content) > MAX_MESSAGE_LENGTH:
-                # Find the last word boundary before MAX_MESSAGE_LENGTH
                 split_index = current_content.rfind(' ', 0, MAX_MESSAGE_LENGTH)
                 if split_index == -1:
-                    # If no space is found, use MAX_MESSAGE_LENGTH
                     split_index = MAX_MESSAGE_LENGTH
 
                 message_to_send = current_content[:split_index]
                 remaining_content = current_content[split_index:].strip()
                 shared_content['content'] = remaining_content
                 
-                await bot_message.edit(content=message_to_send)
+                bot_message = await bot_message.edit(content=message_to_send)
+                all_messages[len(all_messages) - 1] = bot_message  # Add the new message to the list
+
                 bot_message = await bot_message.channel.send(remaining_content)
-                latest_bot_message = bot_message
+                all_messages.append(bot_message)  # Add the new message to the list
             elif current_content:
-                # Edit the existing message with the current content
-                await bot_message.edit(content=current_content)
+                bot_message = await bot_message.edit(content=current_content)
+                all_messages[len(all_messages) - 1] = bot_message  # Add the new message to the list
+
+    return all_messages  # Return the list of messages
+
 
 async def stream_chat(messages, shared_content, shared_content_lock, max_retries=3):
     message_buff = ""
@@ -228,7 +233,8 @@ async def on_message(message):
         # Filter attachments for image file types
         images_to_process = [attachment.url for attachment in message.attachments if any(attachment.filename.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.svg'))]
         image_descriptions = await get_image_descriptions(images_to_process)
-
+        for descriptions in image_descriptions:
+            print("Image description: " + descriptions)
     elif not message.channel.permissions_for(message.guild.me).attach_files:
         await message.channel.send("I don't have permission to analyze images.")
         latest_bot_message = message
@@ -242,15 +248,26 @@ async def on_message(message):
     shared_content_lock = asyncio.Lock()
 
     # Run streaming and message updating concurrently
-    await asyncio.gather(
+    gathered_tasks = asyncio.gather(
         stream_chat(contexts[guild_id], shared_content, shared_content_lock),
         update_message_periodically(bot_message, shared_content, shared_content_lock)
     )
-    
+
+    # Await the results of the gathered tasks
+    results = await gathered_tasks
+    # results[0] will be the output from stream_chat (if it returns anything)
+    # results[1] will be the output from update_message_periodically
+    all_sent_messages = results[1]
+
     contexts[guild_id].append({"role": "assistant", "content": shared_content["content"]})
 
     llm_response = shared_content["content"]
     json_string = extract_json_string(llm_response)
+
+    all_messages = []
+    for discord_message in all_sent_messages:
+        all_messages.append(discord_message.content)
+    concatenated_messages = ' '.join(all_messages)
 
     if json_string:
         try:
@@ -259,6 +276,7 @@ async def on_message(message):
                 prompt = response_data.get("prompt", "")
                 image_files = []
                 for i in range(4):
+                    print("Image prompt: " + prompt)
                     image_data = await generate_image_from_text(prompt)
                     if image_data:
                         image_files.append(discord.File(fp=io.BytesIO(image_data), filename=f'ai-image-{i}.png'))
@@ -266,9 +284,29 @@ async def on_message(message):
                 # Send all images in one message
                 if image_files:
                     await message.channel.send(files=image_files)
+
+            # Replace JSON string with "-" in the concatenated string
+            concatenated_messages = concatenated_messages.replace(json_string, "-")
+
         except json.JSONDecodeError:
             # Handle or ignore invalid JSON
             pass
+
+    # Split the modified concatenated string back into messages
+    modified_messages = []
+    while len(concatenated_messages) > 0:
+        split_index = min(MAX_MESSAGE_LENGTH, len(concatenated_messages))
+        modified_messages.append(concatenated_messages[:split_index])
+        concatenated_messages = concatenated_messages[split_index:]
+
+    # Assuming 'discord_messages' is a list of Discord message objects corresponding to 'all_sent_messages'
+    i = 0
+    print(modified_messages)
+    for discord_message in all_sent_messages:
+        if i < len(modified_messages):
+            await discord_message.edit(content=modified_messages[i])
+            i = i + 1
+            await asyncio.sleep(0.2)  # Throttle the message editing
 
 # Start the Discord bot
 token = os.getenv('DISCORD_TOKEN')
