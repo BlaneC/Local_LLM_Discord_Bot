@@ -68,45 +68,59 @@ async def generate_image_from_text(prompt):
                 print(f"Error generating image: {response.status}")
                 return None
 
-async def update_message_periodically(bot_message, shared_content):
+async def update_message_periodically(bot_message, shared_content, shared_content_lock):
     while not shared_content['done']:
         await asyncio.sleep(STREAM_UPDATE_PERIOD)
-        current_content = shared_content['content']
+        async with shared_content_lock:    
+            current_content = shared_content['content']
 
-        if len(current_content) > MAX_MESSAGE_LENGTH:
-            # Find the last word boundary before MAX_MESSAGE_LENGTH
-            split_index = current_content.rfind(' ', 0, MAX_MESSAGE_LENGTH)
-            if split_index == -1:
-                # If no space is found, use MAX_MESSAGE_LENGTH
-                split_index = MAX_MESSAGE_LENGTH
+            if len(current_content) > MAX_MESSAGE_LENGTH:
+                # Find the last word boundary before MAX_MESSAGE_LENGTH
+                split_index = current_content.rfind(' ', 0, MAX_MESSAGE_LENGTH)
+                if split_index == -1:
+                    # If no space is found, use MAX_MESSAGE_LENGTH
+                    split_index = MAX_MESSAGE_LENGTH
 
-            message_to_send = current_content[:split_index]
-            remaining_content = current_content[split_index:].strip()
-            shared_content['content'] = remaining_content
-            
-            await bot_message.edit(content=message_to_send)
-            bot_message = await bot_message.channel.send(remaining_content)
-            latest_bot_message = bot_message
-        elif current_content:
-            # Edit the existing message with the current content
-            await bot_message.edit(content=current_content)
+                message_to_send = current_content[:split_index]
+                remaining_content = current_content[split_index:].strip()
+                shared_content['content'] = remaining_content
+                
+                await bot_message.edit(content=message_to_send)
+                bot_message = await bot_message.channel.send(remaining_content)
+                latest_bot_message = bot_message
+            elif current_content:
+                # Edit the existing message with the current content
+                await bot_message.edit(content=current_content)
 
-async def stream_chat(messages, shared_content):
+async def stream_chat(messages, shared_content, shared_content_lock, max_retries=3):
     message_buff = ""
-    async with aiohttp.ClientSession() as session:
-        async with session.post("http://localhost:11434/api/chat", json={"model": model, "messages": messages, "system": SYSTEM_MESSAGE + PRE_PROMPT_JSON, "stream": True}) as response:
-            async for line in response.content:
-                body = json.loads(line.decode('utf-8'))
-                if "error" in body:
-                    raise Exception(body["error"])
-                else:
-                    message_buff += body.get("message", {}).get("content", "")
-                if body.get("done") is False:
-                    shared_content['content'] += message_buff
-                    message_buff = ""
-                if body.get("done", False):
-                    shared_content['done'] = True
-                    break
+    timeout = aiohttp.ClientTimeout(total=600)  # 60 seconds, adjust as needed
+    retries = 0
+
+    while retries < max_retries:
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post("http://localhost:11434/api/chat", json={"model": model, "messages": messages, "system": SYSTEM_MESSAGE + PRE_PROMPT_JSON, "stream": True}) as response:
+                    async for line in response.content:
+                        body = json.loads(line.decode('utf-8'))
+                        if "error" in body:
+                            raise Exception(body["error"])
+                        else:
+                            message_buff += body.get("message", {}).get("content", "")
+                        async with shared_content_lock:    
+                            if body.get("done") is False:
+                                shared_content['content'] += message_buff
+                                message_buff = ""
+                            else:
+                                shared_content['done'] = True
+                                print("Duration: " + str(body.get("total_duration")))
+                                return  # Successful completion
+        except asyncio.TimeoutError:
+            print(f"Timeout occurred, retrying {retries + 1}/{max_retries}...")
+            retries += 1
+            await asyncio.sleep(1)  # Wait a bit before retrying
+
+    print("Failed to complete request after several retries.")
 
 def create_context(guild_id):
     if guild_id not in contexts:
@@ -225,31 +239,35 @@ async def on_message(message):
     await bot_message.edit(content="Thinking...")
     shared_content = {'content': '', 'done': False}
 
+    shared_content_lock = asyncio.Lock()
+
     # Run streaming and message updating concurrently
     await asyncio.gather(
-        stream_chat(contexts[guild_id], shared_content),
-        update_message_periodically(bot_message, shared_content)
+        stream_chat(contexts[guild_id], shared_content, shared_content_lock),
+        update_message_periodically(bot_message, shared_content, shared_content_lock)
     )
+    
     contexts[guild_id].append({"role": "assistant", "content": shared_content["content"]})
 
     llm_response = shared_content["content"]
     json_string = extract_json_string(llm_response)
 
     if json_string:
-        llm_response = llm_response.replace(json_string.strip(), "\nGenerating Image...")
-        await latest_bot_message.edit(content=llm_response)
         try:
             response_data = json.loads(json_string)
             if response_data.get("command") == "generate_image":
                 prompt = response_data.get("prompt", "")
-                image_data = await generate_image_from_text(prompt)
-                if image_data:
-                    with io.BytesIO(image_data) as image_binary:
-                        discord_file = discord.File(fp=image_binary, filename='ai-image.png')
-                        await latest_bot_message.edit(content=llm_response.replace("Generating Image...", "-"))
-                        latest_bot_message = await message.channel.send(file=discord_file)
+                image_files = []
+                for i in range(4):
+                    image_data = await generate_image_from_text(prompt)
+                    if image_data:
+                        image_files.append(discord.File(fp=io.BytesIO(image_data), filename=f'ai-image-{i}.png'))
+
+                # Send all images in one message
+                if image_files:
+                    await message.channel.send(files=image_files)
         except json.JSONDecodeError:
-            # If the extracted string isn't valid JSON, handle or ignore
+            # Handle or ignore invalid JSON
             pass
 
 # Start the Discord bot
